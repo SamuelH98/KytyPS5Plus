@@ -1,7 +1,5 @@
 # Standalone PKG extractor for KytyPS5
 
-Based on code that used to be in KytyPS5.
-
 It has two main parts:
 
 # pkg_extractor exe / AppImage
