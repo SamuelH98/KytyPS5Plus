@@ -1,4 +1,6 @@
-# KytyPS5Plus is a standalone PKG extractor based on code that used to be in KytyPS5.
+# Standalone PKG extractor for KytyPS5
+
+Based on code that used to be in KytyPS5.
 
 It has two main parts:
 

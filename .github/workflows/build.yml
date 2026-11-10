@@ -48,6 +48,30 @@ jobs:
           name: kytyps5plus-pkg-extractor-linux-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
           path: upload/
 
+  macos:
+    runs-on: macos-latest
+    needs: get-info
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Package
+        run: |
+          mkdir upload
+          cp build/pkg_extractor extractor/*.sh extractor/readme_linux.txt upload/
+          chmod +x upload/*
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kytyps5plus-pkg-extractor-macos-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+          path: upload/
+
   linux-sanitizers:
     runs-on: ubuntu-24.04
     steps:
@@ -85,7 +109,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
-    needs: [linux, windows]
+    needs: [linux, windows, macos]
     permissions:
       contents: write
     steps:
@@ -93,13 +117,20 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true
       - name: Package release assets
         run: |
-          chmod +x artifacts/pkg_extractor artifacts/*.sh
           mkdir -p dist
-          (cd artifacts && zip -r ../dist/kytyps5plus-pkg-extractor-linux-x86_64.zip pkg_extractor ./*.sh readme_linux.txt)
-          (cd artifacts && zip -r ../dist/kytyps5plus-pkg-extractor-win64.zip pkg_extractor.exe ./*.bat readme_windows.txt)
+          for dir in artifacts/*/; do
+            case "$dir" in
+              *linux*) plat=linux-x86_64; files=(pkg_extractor ./*.sh readme_linux.txt) ;;
+              *macos*) plat=macos-universal; files=(pkg_extractor ./*.sh readme_linux.txt) ;;
+              *win64*) plat=win64; files=(pkg_extractor.exe ./*.bat readme_windows.txt) ;;
+              *) continue ;;
+            esac
+            chmod +x "$dir"pkg_extractor "$dir"*.sh 2>/dev/null || true
+            (cd "$dir" && zip -r "../../dist/kytyps5plus-pkg-extractor-$plat.zip" "${files[@]}")
+          done
+          ls -l dist
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
