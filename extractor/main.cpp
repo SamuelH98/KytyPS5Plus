@@ -1,0 +1,151 @@
+// SPDX-FileCopyrightText: 2026 KytyPS5Plus contributors
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// pkg_extractor <file.pkg> [output_dir] [--check-type] [--type base|patch|dlc]
+//
+// Same contract as the ShadPs4Plus extractor this project is modelled on:
+//   * 2nd argument is the output folder; without it the package is extracted next to the file.
+//   * --check-type does not extract; it exits with 101 (base game), 102 (update), 103 (DLC),
+//     or 0 if the file could not be read. install_pkg.sh/.bat rely on these codes.
+//   * With a single argument (drag and drop on Windows) the window waits for [enter] at the end.
+//
+// Extraction exit codes: 0 = everything written, 3 = written but incomplete (inner PFS image
+// and/or encrypted entries were not extracted), 1 = failure.
+
+#include <filesystem>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "pkg.h"
+
+namespace fs = std::filesystem;
+using kyty::Pkg;
+using kyty::PkgType;
+
+namespace {
+
+constexpr int kExitOk = 0;
+constexpr int kExitFail = 1;
+constexpr int kExitIncomplete = 3;
+
+void PrintUsage() {
+    std::cout << "KytyPS5Plus PKG extractor\n"
+                 "usage: pkg_extractor <file.pkg> [output_dir] [--check-type] [--type base|patch|dlc]\n"
+                 "  output_dir    where to extract (default: next to the pkg file)\n"
+                 "  --check-type  do not extract; exit with 101 base / 102 update / 103 dlc (0 = error)\n"
+                 "  --type        override the detected package type\n";
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    std::vector<std::string> positional;
+    bool check_type = false;
+    std::optional<PkgType> forced_type;
+
+    for (int i = 1; i < argc; i++) {
+        const std::string arg = argv[i];
+        if (arg == "--check-type") {
+            check_type = true;
+        } else if (arg == "--type" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if (v == "base") forced_type = PkgType::Base;
+            else if (v == "patch") forced_type = PkgType::Patch;
+            else if (v == "dlc") forced_type = PkgType::Dlc;
+            else {
+                std::cout << "unknown --type value: " << v << std::endl;
+                return check_type ? 0 : kExitFail;
+            }
+        } else if (arg == "--help" || arg == "-h") {
+            PrintUsage();
+            return kExitOk;
+        } else {
+            positional.push_back(arg);
+        }
+    }
+
+    const bool drag_and_drop = (argc == 2);
+    const int error_code = check_type ? 0 : kExitFail;
+    int result = error_code;
+
+    auto finish = [&](const fs::path& file) {
+        std::cout << "\nTHE END " << file << std::endl;
+        if (drag_and_drop) {
+            std::cout << "\nPress [enter] to exit." << std::endl;
+            std::cin.get();
+        }
+        return result;
+    };
+
+    if (positional.empty()) {
+        PrintUsage();
+        return error_code;
+    }
+
+    const fs::path file = positional[0];
+
+    if (!Pkg::IsPkg(file)) {
+        std::cout << file << " doesn't appear to be a valid PKG file" << std::endl;
+        return finish(file);
+    }
+    std::cout << file << " is a valid PKG\n" << std::endl;
+
+    Pkg pkg;
+    std::string fail;
+    if (!pkg.Open(file, fail)) {
+        std::cout << "Cannot open PKG file : " << fail << std::endl;
+        return finish(file);
+    }
+
+    const PkgType type = forced_type.value_or(pkg.GetType());
+    std::cout << pkg.TypeDescription(type) << std::endl;
+
+    if (check_type) {
+        result = static_cast<int>(type);
+        return result; // no pause: this mode is called from scripts
+    }
+
+    fs::path out = positional.size() > 1 ? fs::path(positional[1]) : file.parent_path();
+    out /= pkg.TitleId();
+    if (type == PkgType::Patch) {
+        out += "-patch";
+    } else if (type == PkgType::Dlc) {
+        const std::string label = pkg.EntitlementLabel();
+        if (label.empty()) {
+            std::cout << "content id has no entitlement label, extracting into the title folder" << std::endl;
+        } else {
+            out /= label;
+        }
+    }
+
+    std::cout << "Extracting pkg to " << out << std::endl;
+
+    kyty::ExtractReport report;
+    const bool ok = pkg.Extract(out, report, fail, [](size_t done, size_t total) {
+        std::cout << "\r      Extracting file " << done << " of " << total << std::flush;
+    });
+    std::cout << std::endl;
+
+    if (!ok) {
+        std::cout << "Cannot extract PKG file : " << fail << std::endl;
+        result = kExitFail;
+        return finish(file);
+    }
+
+    std::cout << report.written << " file(s) written" << std::endl;
+    if (report.skipped_encrypted)
+        std::cout << "NOTE: " << report.skipped_encrypted << " encrypted entr"
+                  << (report.skipped_encrypted == 1 ? "y" : "ies") << " skipped (no key handling)" << std::endl;
+    if (report.skipped_out_of_bounds)
+        std::cout << "WARNING: " << report.skipped_out_of_bounds
+                  << " entr" << (report.skipped_out_of_bounds == 1 ? "y points" : "ies point")
+                  << " outside the file (truncated or corrupt package)" << std::endl;
+    if (report.inner_image_present)
+        std::cout << "NOTE: the inner PFS image (" << report.inner_image_size
+                  << " bytes) was NOT extracted; this build only extracts package metadata entries." << std::endl;
+
+    result = report.Complete() ? kExitOk : kExitIncomplete;
+    return finish(file);
+}

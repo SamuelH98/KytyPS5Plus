@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=KytyPS5Plus PKG Extractor
+Exec=pkg_extractor
+Terminal=true
+Type=Application
+Comment=KytyPS5Plus PKG Extractor
+Categories=Game;Emulator;
+StartupWMClass=pkg_extractor;
