@@ -12,8 +12,12 @@ If no second argument is provided, it will be extracted next to the pkg file.
 On Windows, you can drag and drop the pkg file onto the exe and it will extract it at the same location.
 
 ```
-pkg_extractor <file.pkg> [output_dir] [--check-type] [--type base|patch|dlc]
+pkg_extractor <file.pkg> [output_dir] [--check-type] [--info] [--type base|patch|dlc]
 ```
+
+`--info` extracts nothing and prints the header fields, content flags, entry table and the raw
+bytes of the headers and of the start of the inner image. Use it to see why a package was
+classified the way it was, and attach its output to a bug report.
 
 Output layout (same as the tool this is modelled on):
 
@@ -58,8 +62,9 @@ format. That is the next milestone.
 **Unverified assumptions.** The header offsets, entry layout and entry-id table were derived from the
 readable parts of PS5PKGTool and the PS4 package layout the format descends from. They have been
 tested against synthetic packages in `tests/`, **not against real console packages**. Package-type
-detection (`101`/`102`/`103`) is a heuristic on the content flags and PARAM.SFO category; use `--type`
-to override it if a package is classified wrongly.
+detection (`101`/`102`/`103`) is a heuristic: patch is decided by the content-flag patch bits, DLC
+only by the PARAM.SFO category (the `GD_AC` flag misclassified a real base game, so it is ignored).
+The extractor prints which rule decided; use `--type` to override it if a package is classified wrongly.
 
 # Build
 

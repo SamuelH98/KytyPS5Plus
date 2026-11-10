@@ -145,9 +145,14 @@ def main():
     r.check("dlc (sfo category) -> 103", code == 103, (code, out))
     code, out = r.run(pkg, r.path("out3"))
     r.check("dlc goes to TITLE/label", os.path.isfile(r.path("out3", TITLE, "TESTLABEL0000000", "sce_sys", "param.sfo")), out)
-    pkg = r.write("dlc2.pkg", build_cnt(CID, FLAG_GD_AC, base_entries()))
-    code, _ = r.run(pkg, "--check-type")
-    r.check("dlc (GD_AC flag) -> 103", code == 103, code)
+    # Regression: a real PS5 base game carried the GD_AC bit and was misclassified as DLC.
+    # The flag alone must not decide DLC any more.
+    pkg = r.write("gdac_base.pkg", build_cnt(CID, FLAG_GD_AC, base_entries()))
+    code, out = r.run(pkg, "--check-type")
+    r.check("GD_AC flag alone is NOT dlc -> 101", code == 101, (code, out))
+    code, out = r.run(pkg, "--info")
+    r.check("--info runs and shows the flag and the decision",
+            code == 0 and "GD_AC" in out and "detected type" in out and "default: base game" in out, (code, out))
 
     # 4. --type override
     pkg = r.write("base2.pkg", build_cnt(CID, 0, base_entries()))
@@ -156,6 +161,9 @@ def main():
 
     # 5. FIH debug package with inner PFS -> incomplete (exit 3), metadata still written
     pkg = r.write("debug.pkg", wrap_fih(build_cnt(CID, 0, base_entries())))
+    code, out = r.run(pkg, "--info")
+    r.check("--info on FIH package dumps FIH header and PFS start",
+            code == 0 and "FIH header" in out and "start of inner PFS image" in out and "AA AA AA" in out, (code, out))
     code, out = r.run(pkg, "--check-type")
     r.check("fih debug --check-type -> 101", code == 101, (code, out))
     code, out = r.run(pkg, r.path("out5"))
@@ -194,7 +202,10 @@ def main():
             os.path.isfile(r.path("out8b", "nested", TITLE, "sce_sys", "param.json"))
             and not os.path.exists(r.path("out8b", "pwn_title")) and not os.path.exists(r.path("pwn_title")), (code, out))
     evil_cid = f"UP0000-{TITLE}_00-../../pwn"
-    pkg = r.write("evil_label.pkg", build_cnt(evil_cid, FLAG_GD_AC, base_entries()))
+    ac_sfo = psf([("CATEGORY", "ac"), ("TITLE_ID", TITLE), ("CONTENT_ID", evil_cid)])
+    pkg = r.write("evil_label.pkg", build_cnt(evil_cid, 0, base_entries() + [(0x1000, None, ac_sfo, 0)]))
+    code, out = r.run(pkg, "--check-type")
+    r.check("hostile-label package is classified as dlc (so the label path is exercised)", code == 103, (code, out))
     code, out = r.run(pkg, r.path("out8c", "nested"))
     r.check("hostile entitlement label: stays inside title folder",
             os.path.isfile(r.path("out8c", "nested", TITLE, "sce_sys", "param.json"))

@@ -32,8 +32,9 @@ constexpr int kExitIncomplete = 3;
 
 void PrintUsage() {
     std::cout << "KytyPS5Plus PKG extractor\n"
-                 "usage: pkg_extractor <file.pkg> [output_dir] [--check-type] [--type base|patch|dlc]\n"
+                 "usage: pkg_extractor <file.pkg> [output_dir] [--check-type] [--info] [--type base|patch|dlc]\n"
                  "  output_dir    where to extract (default: next to the pkg file)\n"
+                 "  --info        print header fields, flags, entries and raw header bytes, then exit\n"
                  "  --check-type  do not extract; exit with 101 base / 102 update / 103 dlc (0 = error)\n"
                  "  --type        override the detected package type\n";
 }
@@ -43,12 +44,15 @@ void PrintUsage() {
 int main(int argc, char** argv) {
     std::vector<std::string> positional;
     bool check_type = false;
+    bool info = false;
     std::optional<PkgType> forced_type;
 
     for (int i = 1; i < argc; i++) {
         const std::string arg = argv[i];
         if (arg == "--check-type") {
             check_type = true;
+        } else if (arg == "--info") {
+            info = true;
         } else if (arg == "--type" && i + 1 < argc) {
             const std::string v = argv[++i];
             if (v == "base") forced_type = PkgType::Base;
@@ -99,8 +103,14 @@ int main(int argc, char** argv) {
         return finish(file);
     }
 
+    if (info) {
+        pkg.PrintInfo(std::cout);
+        result = kExitOk;
+        return finish(file);
+    }
+
     const PkgType type = forced_type.value_or(pkg.GetType());
-    std::cout << pkg.TypeDescription(type) << std::endl;
+    std::cout << pkg.TypeDescription(type) << "  (" << pkg.TypeReason() << ")" << std::endl;
 
     if (check_type) {
         result = static_cast<int>(type);

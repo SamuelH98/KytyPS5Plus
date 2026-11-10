@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <ostream>
 
 #include "endian.h"
 #include "psf.h"
@@ -23,6 +24,10 @@ constexpr size_t kCntFieldsSize = 0x80; // fixed fields we read from the CNT hea
 constexpr uint32_t kMaxEntries = 0x10000;
 constexpr uint64_t kMaxMetadataEntry = 16ull * 1024 * 1024;
 constexpr size_t kEntrySize = 32;
+
+constexpr uint32_t kPatchMask = static_cast<uint32_t>(ContentFlag::FirstPatch) |
+                                static_cast<uint32_t>(ContentFlag::PatchGo) |
+                                static_cast<uint32_t>(ContentFlag::SubsequentPatch);
 
 constexpr uint32_t kIdNameTable = 0x0200;
 constexpr uint32_t kIdParamSfo = 0x1000;
@@ -193,6 +198,8 @@ bool Pkg::Open(const fs::path& file, std::string& fail) {
             return false;
         }
         kind_ = PkgKind::FinalizedDebug;
+        signed_byte_ = signed_byte;
+        format_version_ = le16(head + 6);
         pfs_offset_ = le64(head + 0x10);
         pfs_size_ = le64(head + 0x18);
         cnt_base_ = le64(head + 0x58);
@@ -220,6 +227,8 @@ bool Pkg::Open(const fs::path& file, std::string& fail) {
     const uint32_t entry_count = be32(cnt + 0x10);
     const uint32_t table_offset = be32(cnt + 0x18);
     content_id_ = TrimNul(cnt + 0x40, 0x24);
+    drm_type_ = be32(cnt + 0x70);
+    content_type_ = be32(cnt + 0x74);
     content_flags_ = be32(cnt + 0x78);
 
     if (entry_count == 0 || entry_count > kMaxEntries) {
@@ -326,13 +335,86 @@ void Pkg::LoadMetadata() {
 }
 
 PkgType Pkg::GetType() const {
-    constexpr uint32_t patch_mask = static_cast<uint32_t>(ContentFlag::FirstPatch) |
-                                    static_cast<uint32_t>(ContentFlag::PatchGo) |
-                                    static_cast<uint32_t>(ContentFlag::SubsequentPatch);
-    if (content_flags_ & patch_mask) return PkgType::Patch;
-    if (sfo_category_ == "ac" || (content_flags_ & static_cast<uint32_t>(ContentFlag::GdAc)))
-        return PkgType::Dlc;
+    // The GD_AC content flag is deliberately NOT used: it classified a real PS5 base game as DLC.
+    // The PS4 meaning of the content-flag bits has not been confirmed for PS5 packages, so only
+    // the PARAM.SFO category decides DLC. Use --info to see the raw values, --type to override.
+    if (content_flags_ & kPatchMask) return PkgType::Patch;
+    if (sfo_category_ == "ac") return PkgType::Dlc;
     return PkgType::Base;
+}
+
+std::string Pkg::TypeReason() const {
+    char buf[160];
+    if (content_flags_ & kPatchMask) {
+        std::snprintf(buf, sizeof(buf), "content_flags 0x%08X contains patch bits 0x%08X", content_flags_,
+                      content_flags_ & kPatchMask);
+        return buf;
+    }
+    if (sfo_category_ == "ac") return "PARAM.SFO CATEGORY is \"ac\"";
+    return "no patch bits in content_flags and no PARAM.SFO \"ac\" category (default: base game)";
+}
+
+void Pkg::PrintInfo(std::ostream& os) const {
+    auto hex = [&](const char* title, uint64_t offset, size_t size) {
+        std::ifstream f(file_, std::ios::binary);
+        std::vector<uint8_t> data(size);
+        f.seekg(static_cast<std::streamoff>(offset));
+        f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size));
+        data.resize(static_cast<size_t>(f.gcount()));
+        os << "\n-- " << title << " (offset 0x" << std::hex << offset << ", " << std::dec << data.size()
+           << " bytes)\n";
+        for (size_t i = 0; i < data.size(); i += 16) {
+            char line[96];
+            int n = std::snprintf(line, sizeof(line), "%08llX  ", static_cast<unsigned long long>(offset + i));
+            for (size_t j = 0; j < 16 && i + j < data.size(); j++)
+                n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), "%02X ", data[i + j]);
+            os << line << "\n";
+        }
+    };
+
+    char buf[128];
+    os << "== KytyPS5Plus package info ==\n";
+    os << "file size        : " << file_size_ << "\n";
+    os << "kind             : "
+       << (kind_ == PkgKind::FinalizedDebug ? "finalized debug (FIH)" : "metadata container (bare CNT)") << "\n";
+    std::snprintf(buf, sizeof(buf), "0x%02X", signed_byte_);
+    os << "FIH signed byte  : " << buf << "\n";
+    os << "FIH format ver   : " << format_version_ << "\n";
+    std::snprintf(buf, sizeof(buf), "0x%llX", static_cast<unsigned long long>(cnt_base_));
+    os << "CNT base         : " << buf << "\n";
+    std::snprintf(buf, sizeof(buf), "0x%llX", static_cast<unsigned long long>(pfs_offset_));
+    os << "PFS image offset : " << buf << "\n";
+    os << "PFS image size   : " << pfs_size_ << "\n";
+    os << "content id       : " << content_id_ << "\n";
+    os << "title id         : " << title_id_ << "\n";
+    std::snprintf(buf, sizeof(buf), "0x%08X", content_flags_);
+    os << "content_flags    : " << buf;
+    struct Named { uint32_t bit; const char* name; };
+    constexpr Named names[] = {{0x100000, "FIRST_PATCH"}, {0x200000, "PATCHGO"}, {0x400000, "REMASTER"},
+                               {0x800000, "PS_CLOUD"},    {0x2000000, "GD_AC"},  {0x4000000, "NON_GAME"},
+                               {0x40000000, "SUBSEQUENT_PATCH"}};
+    for (const Named& n : names)
+        if (content_flags_ & n.bit) os << " " << n.name;
+    os << "\n";
+    std::snprintf(buf, sizeof(buf), "0x%08X", drm_type_);
+    os << "drm_type         : " << buf << "\n";
+    std::snprintf(buf, sizeof(buf), "0x%08X", content_type_);
+    os << "content_type     : " << buf << "\n";
+    os << "SFO CATEGORY     : " << (sfo_category_.empty() ? "(none)" : sfo_category_) << "\n";
+    os << "detected type    : " << TypeDescription(GetType()) << "  [" << TypeReason() << "]\n";
+
+    os << "\n-- entries (" << entries_.size() << ")\n";
+    os << "id      flags1    flags2    offset    size      path\n";
+    for (const PkgEntry& e : entries_) {
+        std::snprintf(buf, sizeof(buf), "0x%04X  %08X  %08X  %08X  %-8u  ", e.id, e.flags1, e.flags2,
+                      e.data_offset, e.data_size);
+        os << buf << e.path << (e.Encrypted() ? "  [encrypted]" : "") << (e.in_bounds ? "" : "  [OUT OF BOUNDS]")
+           << "\n";
+    }
+
+    if (kind_ == PkgKind::FinalizedDebug) hex("FIH header", 0, 0x60);
+    hex("CNT header", cnt_base_, 0x80);
+    if (kind_ == PkgKind::FinalizedDebug && pfs_size_ > 0) hex("start of inner PFS image", pfs_offset_, 0x200);
 }
 
 std::string Pkg::TypeDescription(PkgType type) const {

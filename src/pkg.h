@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -77,6 +78,12 @@ public:
 
     PkgType GetType() const;
     std::string TypeDescription(PkgType type) const;
+    /// Which rule decided GetType(), so a misdetection can be diagnosed.
+    std::string TypeReason() const;
+
+    /// Dumps everything the parser learned (header fields, flags, entry table, raw header and
+    /// inner-image bytes) in a form that can be pasted into a bug report. Used by `--info`.
+    void PrintInfo(std::ostream& os) const;
 
     /// 9-character title id such as "PPSA01234".
     const std::string& TitleId() const {
@@ -113,6 +120,10 @@ private:
     PkgKind kind_ = PkgKind::MetadataContainer;
     uint64_t pfs_offset_ = 0;
     uint64_t pfs_size_ = 0;
+    uint8_t signed_byte_ = 0;
+    uint16_t format_version_ = 0;
+    uint32_t drm_type_ = 0;
+    uint32_t content_type_ = 0;
     uint32_t content_flags_ = 0;
     std::string title_id_;
     std::string content_id_;
