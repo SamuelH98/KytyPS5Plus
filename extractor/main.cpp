@@ -12,10 +12,14 @@
 // Extraction exit codes: 0 = everything written, 3 = written but incomplete (inner PFS image
 // and/or encrypted entries were not extracted), 1 = failure.
 
+#include <cerrno>
+#include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pkg.h"
@@ -32,9 +36,10 @@ constexpr int kExitIncomplete = 3;
 
 void PrintUsage() {
     std::cout << "KytyPS5Plus PKG extractor\n"
-                 "usage: pkg_extractor <file.pkg> [output_dir] [--check-type] [--info] [--type base|patch|dlc]\n"
+                 "usage: pkg_extractor <file.pkg> [output_dir] [--check-type] [--info] [--dump O L] [--type base|patch|dlc]\n"
                  "  output_dir    where to extract (default: next to the pkg file)\n"
                  "  --info        print header fields, flags, entries and raw header bytes, then exit\n"
+                 "  --dump O L    hex-dump L bytes (max 65536) at offset O (decimal or 0x hex); repeatable\n"
                  "  --check-type  do not extract; exit with 101 base / 102 update / 103 dlc (0 = error)\n"
                  "  --type        override the detected package type\n";
 }
@@ -45,6 +50,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> positional;
     bool check_type = false;
     bool info = false;
+    std::vector<std::pair<uint64_t, uint64_t>> dumps; // (offset, length) from --dump
     std::optional<PkgType> forced_type;
 
     for (int i = 1; i < argc; i++) {
@@ -53,6 +59,22 @@ int main(int argc, char** argv) {
             check_type = true;
         } else if (arg == "--info") {
             info = true;
+        } else if (arg == "--dump") {
+            uint64_t values[2] = {};
+            bool ok = i + 2 < argc;
+            for (int k = 0; ok && k < 2; k++) {
+                const char* text = argv[i + 1 + k];
+                char* end = nullptr;
+                errno = 0;
+                values[k] = std::strtoull(text, &end, 0); // accepts 0x... hex and decimal
+                ok = errno == 0 && end != text && *end == '\0' && text[0] != '-';
+            }
+            if (!ok) {
+                std::cout << "--dump needs two numbers: <offset> <length> (decimal or 0x hex)" << std::endl;
+                return check_type ? 0 : kExitFail;
+            }
+            dumps.emplace_back(values[0], values[1]);
+            i += 2;
         } else if (arg == "--type" && i + 1 < argc) {
             const std::string v = argv[++i];
             if (v == "base") forced_type = PkgType::Base;
@@ -103,9 +125,12 @@ int main(int argc, char** argv) {
         return finish(file);
     }
 
-    if (info) {
-        pkg.PrintInfo(std::cout);
+    // --check-type is the machine interface used by the install scripts, so it always wins.
+    if ((info || !dumps.empty()) && !check_type) {
+        if (info) pkg.PrintInfo(std::cout);
         result = kExitOk;
+        for (const auto& [offset, length] : dumps)
+            if (!pkg.DumpRegion(std::cout, offset, length)) result = kExitFail;
         return finish(file);
     }
 

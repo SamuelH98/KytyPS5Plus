@@ -22,6 +22,7 @@ constexpr uint64_t kCntHeaderSize = 0x5A0;
 constexpr size_t kFihProbeSize = 0x60;
 constexpr size_t kCntFieldsSize = 0x80; // fixed fields we read from the CNT header
 constexpr uint32_t kMaxEntries = 0x10000;
+constexpr uint64_t kMaxDumpBytes = 0x10000; // per --dump / per --info section
 constexpr uint64_t kMaxMetadataEntry = 16ull * 1024 * 1024;
 constexpr size_t kEntrySize = 32;
 
@@ -177,7 +178,7 @@ bool Pkg::Open(const fs::path& file, std::string& fail) {
     }
     const uint32_t magic = be32(head);
     cnt_base_ = 0;
-    pfs_offset_ = pfs_size_ = 0;
+    pfs_offset_ = pfs_size_ = superblock_offset_ = 0;
 
     if (magic == kMagicFih) {
         if (file_size_ < kFihProbeSize || !ReadAt(f, 0, head, kFihProbeSize)) {
@@ -202,6 +203,7 @@ bool Pkg::Open(const fs::path& file, std::string& fail) {
         format_version_ = le16(head + 6);
         pfs_offset_ = le64(head + 0x10);
         pfs_size_ = le64(head + 0x18);
+        superblock_offset_ = le64(head + 0x20);
         cnt_base_ = le64(head + 0x58);
         if (cnt_base_ > file_size_ || file_size_ - cnt_base_ < kCntHeaderSize) {
             fail = "package has no embedded CNT metadata";
@@ -289,18 +291,20 @@ void Pkg::ResolvePaths() {
 
     for (PkgEntry& e : entries_) {
         std::string path;
-        if (e.id != kIdNameTable && e.name_offset < names.size()) {
+        // A known content id always maps to its fixed sce_sys path. A real PS5 package's name
+        // table lists bare names ("icon0.png", "trophy2/trophy00.ucp") relative to sce_sys, so
+        // taking the name as-is would scatter these files over the title folder root.
+        if (const char* known = KnownPath(e.id)) {
+            path = known;
+        } else if (e.id != kIdNameTable && e.name_offset < names.size()) {
             const char* s = reinterpret_cast<const char*>(names.data()) + e.name_offset;
-            path = SanitizePath(std::string(s, strnlen(s, names.size() - e.name_offset)));
+            const std::string name = SanitizePath(std::string(s, strnlen(s, names.size() - e.name_offset)));
+            if (!name.empty()) path = (name.rfind("sce_sys/", 0) == 0) ? name : "sce_sys/" + name;
         }
         if (path.empty()) {
-            if (const char* known = KnownPath(e.id)) {
-                path = known;
-            } else {
-                char buf[48];
-                std::snprintf(buf, sizeof(buf), "pkg_entries/entry_0x%04X.bin", e.id);
-                path = buf;
-            }
+            char buf[48];
+            std::snprintf(buf, sizeof(buf), "pkg_entries/entry_0x%04X.bin", e.id);
+            path = buf;
         }
         e.path = std::move(path);
     }
@@ -354,23 +358,53 @@ std::string Pkg::TypeReason() const {
     return "no patch bits in content_flags and no PARAM.SFO \"ac\" category (default: base game)";
 }
 
-void Pkg::PrintInfo(std::ostream& os) const {
-    auto hex = [&](const char* title, uint64_t offset, size_t size) {
-        std::ifstream f(file_, std::ios::binary);
-        std::vector<uint8_t> data(size);
-        f.seekg(static_cast<std::streamoff>(offset));
-        f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size));
-        data.resize(static_cast<size_t>(f.gcount()));
-        os << "\n-- " << title << " (offset 0x" << std::hex << offset << ", " << std::dec << data.size()
-           << " bytes)\n";
-        for (size_t i = 0; i < data.size(); i += 16) {
-            char line[96];
-            int n = std::snprintf(line, sizeof(line), "%08llX  ", static_cast<unsigned long long>(offset + i));
-            for (size_t j = 0; j < 16 && i + j < data.size(); j++)
-                n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n), "%02X ", data[i + j]);
-            os << line << "\n";
+void Pkg::HexDump(std::ostream& os, const char* title, uint64_t offset, uint64_t size) const {
+    std::ifstream f(file_, std::ios::binary);
+    std::vector<uint8_t> data(static_cast<size_t>(std::min<uint64_t>(size, kMaxDumpBytes)));
+    f.seekg(static_cast<std::streamoff>(offset));
+    f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    data.resize(static_cast<size_t>(f.gcount()));
+
+    char head[96];
+    std::snprintf(head, sizeof(head), "(offset 0x%llX, %zu bytes)", static_cast<unsigned long long>(offset),
+                  data.size());
+    os << "\n-- " << title << " " << head << "\n";
+    if (data.empty()) {
+        os << "(nothing to read: offset is at or beyond the end of the file)\n";
+        return;
+    }
+    // Runs of identical 16-byte rows are collapsed into a single "*" like hexdump(1), so large
+    // zero-filled regions stay short enough to paste into a bug report.
+    bool starred = false;
+    for (size_t i = 0; i < data.size(); i += 16) {
+        const size_t n = std::min<size_t>(16, data.size() - i);
+        if (i > 0 && n == 16 && std::memcmp(&data[i], &data[i - 16], 16) == 0) {
+            if (!starred) os << "*\n";
+            starred = true;
+            continue;
         }
-    };
+        starred = false;
+        char line[96];
+        int len = std::snprintf(line, sizeof(line), "%08llX  ", static_cast<unsigned long long>(offset + i));
+        for (size_t j = 0; j < n; j++)
+            len += std::snprintf(line + len, sizeof(line) - static_cast<size_t>(len), "%02X ", data[i + j]);
+        os << line << "\n";
+    }
+}
+
+bool Pkg::DumpRegion(std::ostream& os, uint64_t offset, uint64_t length) const {
+    if (offset >= file_size_) {
+        os << "offset is beyond the end of the file (file size " << file_size_ << ")\n";
+        return false;
+    }
+    const uint64_t clamped = std::min<uint64_t>(length, kMaxDumpBytes);
+    HexDump(os, "region", offset, clamped);
+    if (clamped < length) os << "(length limited to " << kMaxDumpBytes << " bytes per --dump)\n";
+    return true;
+}
+
+void Pkg::PrintInfo(std::ostream& os) const {
+    auto hex = [&](const char* title, uint64_t offset, uint64_t size) { HexDump(os, title, offset, size); };
 
     char buf[128];
     os << "== KytyPS5Plus package info ==\n";
@@ -385,6 +419,8 @@ void Pkg::PrintInfo(std::ostream& os) const {
     std::snprintf(buf, sizeof(buf), "0x%llX", static_cast<unsigned long long>(pfs_offset_));
     os << "PFS image offset : " << buf << "\n";
     os << "PFS image size   : " << pfs_size_ << "\n";
+    std::snprintf(buf, sizeof(buf), "0x%llX", static_cast<unsigned long long>(superblock_offset_));
+    os << "PFS superblock   : " << buf << "  (FIH+0x20, unverified meaning)\n";
     os << "content id       : " << content_id_ << "\n";
     os << "title id         : " << title_id_ << "\n";
     std::snprintf(buf, sizeof(buf), "0x%08X", content_flags_);
@@ -414,7 +450,15 @@ void Pkg::PrintInfo(std::ostream& os) const {
 
     if (kind_ == PkgKind::FinalizedDebug) hex("FIH header", 0, 0x60);
     hex("CNT header", cnt_base_, 0x80);
-    if (kind_ == PkgKind::FinalizedDebug && pfs_size_ > 0) hex("start of inner PFS image", pfs_offset_, 0x200);
+    if (kind_ == PkgKind::FinalizedDebug && pfs_size_ > 0) {
+        hex("start of inner PFS image", pfs_offset_, 0x200);
+        // FIH+0x20 points near the end of the image on real packages; this is the block the image
+        // reader needs to see. Only print it when it lies inside the file.
+        if (superblock_offset_ != 0 && superblock_offset_ < file_size_)
+            hex("candidate PFS superblock (FIH+0x20)", superblock_offset_, 0x400);
+        // The block right after the first 64 KiB one, to show what follows the leading block.
+        if (pfs_offset_ + 0x20000 < file_size_) hex("second 64 KiB block of the image", pfs_offset_ + 0x10000, 0x100);
+    }
 }
 
 std::string Pkg::TypeDescription(PkgType type) const {

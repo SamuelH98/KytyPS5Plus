@@ -12,12 +12,18 @@ If no second argument is provided, it will be extracted next to the pkg file.
 On Windows, you can drag and drop the pkg file onto the exe and it will extract it at the same location.
 
 ```
-pkg_extractor <file.pkg> [output_dir] [--check-type] [--info] [--type base|patch|dlc]
+pkg_extractor <file.pkg> [output_dir] [--check-type] [--info] [--dump OFFSET LENGTH] [--type base|patch|dlc]
 ```
 
 `--info` extracts nothing and prints the header fields, content flags, entry table and the raw
-bytes of the headers and of the start of the inner image. Use it to see why a package was
-classified the way it was, and attach its output to a bug report.
+bytes of the headers, of the start of the inner image and of the block the FIH header points at as
+the PFS superblock. Use it to see why a package was classified the way it was, and attach its
+output to a bug report.
+
+`--dump OFFSET LENGTH` hex-dumps `LENGTH` bytes (at most 65536) at `OFFSET` (decimal or `0x` hex),
+and can be repeated. Identical rows are collapsed to `*`. It is meant for diagnosing the inner
+image format from real packages without sharing the package itself. `--check-type` always takes
+precedence over `--info` and `--dump`.
 
 Output layout (same as the tool this is modelled on):
 
@@ -59,9 +65,16 @@ the reference engine used by [PS5PKGTool](https://github.com/pearlxcore/PS5PKGTo
 .NET library, so it cannot be linked into this C++ project and has to be reimplemented from the
 format. That is the next milestone.
 
+**What has been checked against real data.** The FIH/CNT header fields and the 25-entry table of one
+real debug package (a 134 GB base game) were compared with `--info` output from that package, and
+the layout (including the 64-bit offsets, with the CNT metadata at the end of the file) parses
+correctly. Everything else, and the byte-level behaviour of extraction, has only been tested against
+synthetic packages in `tests/`. The inner image layout is **not** verified: its first block starts
+with a `keystone` marker, and the FIH+0x20 field points near the end of the image, but what is
+there has not been decoded yet.
+
 **Unverified assumptions.** The header offsets, entry layout and entry-id table were derived from the
-readable parts of PS5PKGTool and the PS4 package layout the format descends from. They have been
-tested against synthetic packages in `tests/`, **not against real console packages**. Package-type
+readable parts of PS5PKGTool and the PS4 package layout the format descends from. Package-type
 detection (`101`/`102`/`103`) is a heuristic: patch is decided by the content-flag patch bits, DLC
 only by the PARAM.SFO category (the `GD_AC` flag misclassified a real base game, so it is ignored).
 The extractor prints which rule decided; use `--type` to override it if a package is classified wrongly.

@@ -66,7 +66,7 @@ def build_cnt(content_id, flags, entries):
     return bytes(header) + records + blobs
 
 
-def wrap_fih(cnt, signed=0x00, pfs_size=0x4000):
+def wrap_fih(cnt, signed=0x00, pfs_size=0x4000, superblock_in_image=0x2000):
     cnt_base = 0x1000
     pfs_off = cnt_base + len(cnt)
     head = bytearray(cnt_base)
@@ -75,8 +75,12 @@ def wrap_fih(cnt, signed=0x00, pfs_size=0x4000):
     struct.pack_into("<H", head, 6, 1)
     struct.pack_into("<Q", head, 0x10, pfs_off)
     struct.pack_into("<Q", head, 0x18, pfs_size)
+    struct.pack_into("<Q", head, 0x20, pfs_off + superblock_in_image if superblock_in_image else 0)
     struct.pack_into("<Q", head, 0x58, cnt_base)
-    return bytes(head) + cnt + b"\xAA" * pfs_size
+    image = bytearray(b"\xAA" * pfs_size)
+    if superblock_in_image and superblock_in_image + 8 <= pfs_size:
+        image[superblock_in_image:superblock_in_image + 8] = b"SUPERBLK"  # recognisable marker
+    return bytes(head) + cnt + bytes(image)
 
 
 TITLE = "PPSA01234"
@@ -131,6 +135,21 @@ def main():
             open(r.path("out1", TITLE, "sce_sys", "icon0.png"), "rb").read() == b"\x89PNG-fake-icon"
             if os.path.isfile(r.path("out1", TITLE, "sce_sys", "icon0.png")) else False)
 
+    # 1b. Regression from a real package: the name table holds bare names relative to sce_sys.
+    real_like = [(0x2000, "param.json", param_json(), 0), (0x1200, "icon0.png", b"icon", 0),
+                 (0x1480, "trophy2/trophy00.ucp", b"trp", 0), (0x3000, "playgo-scenario.json", b"{}", 0),
+                 (0x9100, "sce_sys/already.dat", b"a", 0)]
+    pkg = r.write("realnames.pkg", build_cnt(CID, 0, real_like))
+    code, out = r.run(pkg, r.path("out1b"))
+    base1b = r.path("out1b", TITLE)
+    r.check("bare names land under sce_sys/",
+            all(os.path.isfile(os.path.join(base1b, *p.split("/"))) for p in (
+                "sce_sys/param.json", "sce_sys/icon0.png", "sce_sys/trophy2/trophy00.ucp",
+                "sce_sys/playgo-scenario.json", "sce_sys/already.dat")), (code, out))
+    r.check("nothing scattered in the title folder root",
+            sorted(os.listdir(base1b)) == ["pkg_entries", "sce_sys"] or sorted(os.listdir(base1b)) == ["sce_sys"],
+            os.listdir(base1b))
+
     # 2. update
     pkg = r.write("patch.pkg", build_cnt(CID, FLAG_FIRST_PATCH, base_entries()))
     code, out = r.run(pkg, "--check-type")
@@ -166,6 +185,35 @@ def main():
             code == 0 and "FIH header" in out and "start of inner PFS image" in out and "AA AA AA" in out, (code, out))
     code, out = r.run(pkg, "--check-type")
     r.check("fih debug --check-type -> 101", code == 101, (code, out))
+    r.check("--info shows the candidate superblock block with its marker bytes",
+            "candidate PFS superblock" in r.run(pkg, "--info")[1] and "53 55 50 45 52 42 4C 4B" in r.run(pkg, "--info")[1])
+
+    # --dump: exact bytes, hex/decimal numbers, repeatable, clamping, errors, row collapsing
+    code, out = r.run(pkg, "--dump", "0x1000", "16")
+    r.check("--dump shows the CNT magic at 0x1000", code == 0 and "00001000  7F 43 4E 54" in out, (code, out))
+    code, out = r.run(pkg, "--dump", "4096", "4", "--dump", "0", "4")
+    r.check("--dump is repeatable and accepts decimal", code == 0 and "7F 43 4E 54" in out and "7F 46 49 48" in out, (code, out))
+    code, out = r.run(pkg, "--dump", "0x1000", "0x7FFFFFFF")
+    r.check("--dump length is capped at 64 KiB", code == 0 and "65536 bytes" in out and "limited to 65536" in out, (code, out[:300]))
+    code, out = r.run(pkg, "--dump", "0x7FFFFFFFFFFF", "16")
+    r.check("--dump beyond EOF fails cleanly (exit 1)", code == 1 and "beyond the end" in out, (code, out))
+    code, out = r.run(pkg, "--dump", "zzz", "16")
+    r.check("--dump rejects bad numbers", code == 1 and "needs two numbers" in out, (code, out))
+    code, out = r.run(pkg, "--dump", "-1", "16")
+    r.check("--dump rejects negative numbers", code == 1 and "needs two numbers" in out, (code, out))
+    code, out = r.run(pkg, "--dump", "5")
+    r.check("--dump with a missing length is an error", code == 1, (code, out))
+    code, out = r.run(pkg, "--dump", "0x2000", "0x2000")
+    r.check("--dump collapses identical rows with *", code == 0 and "\n*\n" in out and out.count("AA AA AA") < 20, (code, out[:400]))
+    code, out = r.run(pkg, "--check-type", "--dump", "0", "16")
+    r.check("--check-type still wins over --dump (no dump output, exit code 101)",
+            code == 101 and "region" not in out, (code, out))
+    code, out = r.run(pkg, "--check-type", "--info")
+    r.check("--check-type still wins over --info", code == 101 and "package info" not in out, (code, out))
+    nosb = r.write("debug_nosb.pkg", wrap_fih(build_cnt(CID, 0, base_entries()), superblock_in_image=0))
+    code, out = r.run(nosb, "--info")
+    r.check("--info omits the superblock section when FIH+0x20 is 0", code == 0 and "candidate PFS superblock" not in out, (code, out[-300:]))
+
     code, out = r.run(pkg, r.path("out5"))
     r.check("fih debug extract exit 3 (inner PFS not extracted)", code == 3, (code, out))
     r.check("fih debug says PFS not extracted", "NOT extracted" in out, out)

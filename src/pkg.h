@@ -85,6 +85,10 @@ public:
     /// inner-image bytes) in a form that can be pasted into a bug report. Used by `--info`.
     void PrintInfo(std::ostream& os) const;
 
+    /// Hex-dumps `length` bytes (capped at 64 KiB) starting at `offset`. Used by `--dump`.
+    /// Returns false when `offset` is at or beyond the end of the file.
+    bool DumpRegion(std::ostream& os, uint64_t offset, uint64_t length) const;
+
     /// 9-character title id such as "PPSA01234".
     const std::string& TitleId() const {
         return title_id_;
@@ -113,6 +117,7 @@ private:
     bool ReadEntry(const PkgEntry& entry, uint64_t max_size, std::vector<uint8_t>& out) const;
     void LoadMetadata();
     void ResolvePaths();
+    void HexDump(std::ostream& os, const char* title, uint64_t offset, uint64_t size) const;
 
     std::filesystem::path file_;
     uint64_t file_size_ = 0;
@@ -120,6 +125,7 @@ private:
     PkgKind kind_ = PkgKind::MetadataContainer;
     uint64_t pfs_offset_ = 0;
     uint64_t pfs_size_ = 0;
+    uint64_t superblock_offset_ = 0; ///< FIH+0x20; meaning not yet verified
     uint8_t signed_byte_ = 0;
     uint16_t format_version_ = 0;
     uint32_t drm_type_ = 0;
